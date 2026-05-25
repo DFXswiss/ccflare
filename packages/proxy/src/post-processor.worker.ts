@@ -813,6 +813,7 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 				timestamp: startMessage.timestamp,
 				payload,
 				timings,
+				retryAttempt: startMessage.retryAttempt,
 			},
 		),
 	);

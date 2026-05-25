@@ -7,6 +7,25 @@ import type { ResolvedProxyContext } from "./proxy-types";
 const log = new Logger("ResponseProcessor");
 
 /**
+ * Determines whether an upstream response is a transient server-side error
+ * that the provider has explicitly marked as retryable via the
+ * `x-should-retry: true` header.
+ *
+ * Anthropic uses this for HTTP 529 ("Overloaded") and other transient 5xx
+ * conditions. Rate-limit responses (HTTP 429) follow the dedicated
+ * rate-limit handling path and are intentionally excluded here.
+ *
+ * @param response - The upstream response to inspect
+ * @returns true if the same account should be retried, false otherwise
+ */
+export function isRetryableUpstreamError(response: Response): boolean {
+	if (response.status < 500) {
+		return false;
+	}
+	return response.headers.get("x-should-retry") === "true";
+}
+
+/**
  * Handles rate limit response for an account
  * @param account - The rate-limited account
  * @param rateLimitInfo - Parsed rate limit information
