@@ -7,6 +7,7 @@ import { makeProxyRequest } from "./request-handler";
 import {
 	handleProxyError,
 	isRetryableUpstreamError,
+	parseRetryAfter,
 	processProxyResponse,
 } from "./response-processor";
 import { getValidAccessToken } from "./token-manager";
@@ -14,16 +15,45 @@ import { getValidAccessToken } from "./token-manager";
 const log = new Logger("ProxyOperations");
 
 /**
- * Computes the backoff delay for the next retry attempt.
- * Attempt 0 is the first retry (i.e. invoked after the initial request),
- * so the delay grows as `delayMs * backoff^attempt`.
+ * Hard ceiling on the base backoff delay (before jitter). Without this, a
+ * configuration like `RETRY_ATTEMPTS=10, RETRY_BACKOFF=2, RETRY_DELAY_MS=1000`
+ * would compute a 1024s wait on the last retry. 30s matches what Anthropic's
+ * own client libraries cap their automatic retries at and is a safe upper
+ * bound for transient `x-should-retry` waits.
+ */
+const MAX_BACKOFF_MS = 30_000;
+
+/**
+ * Computes the backoff delay for the next retry attempt using the
+ * "Full Jitter" strategy from the AWS Architecture Blog
+ * ("Exponential Backoff And Jitter", Marc Brooker, 2015):
+ *
+ *   base     = min(delayMs * backoff^attempt, MAX_BACKOFF_MS)
+ *   jittered = random(0, base)
+ *
+ * Multiple ccflare instances retrying against the same upstream without
+ * jitter would synchronise their retry waves and amplify the overload they
+ * are trying to recover from. Full Jitter spreads the retries across the
+ * full window and outperforms Equal Jitter on overload patterns in the
+ * original AWS measurements.
+ *
+ * When the upstream provides a `retry-after` hint we treat it as a *floor*
+ * (`max(jittered, retryAfterMs)`) -- the provider's guidance overrides our
+ * own backoff math when it asks for more time, but we never wait less than
+ * our own computed jitter when it asks for less.
  */
 function computeBackoffDelay(
 	attempt: number,
 	delayMs: number,
 	backoff: number,
+	retryAfterMs?: number,
 ): number {
-	return delayMs * backoff ** attempt;
+	const base = Math.min(delayMs * backoff ** attempt, MAX_BACKOFF_MS);
+	const jittered = Math.random() * base;
+	if (retryAfterMs !== undefined && retryAfterMs > 0) {
+		return Math.max(jittered, retryAfterMs);
+	}
+	return jittered;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -171,9 +201,17 @@ export async function proxyWithAccount(
 
 			if (attempt < attempts) {
 				const nextAttempt = attempt + 1;
-				const waitMs = computeBackoffDelay(attempt, delayMs, backoff);
+				const retryAfterMs = parseRetryAfter(response);
+				const waitMs = computeBackoffDelay(
+					attempt,
+					delayMs,
+					backoff,
+					retryAfterMs,
+				);
+				const retryAfterSuffix =
+					retryAfterMs !== undefined ? ` (retry-after: ${retryAfterMs}ms)` : "";
 				log.warn(
-					`Retry attempt ${nextAttempt}/${attempts} for account ${account.name} after upstream ${response.status} (x-should-retry); waiting ${waitMs}ms`,
+					`Retry attempt ${nextAttempt}/${attempts} for account ${account.name} after upstream ${response.status} (x-should-retry); waiting ${waitMs}ms${retryAfterSuffix}`,
 				);
 				retryAttempt = nextAttempt;
 				await sleep(waitMs);

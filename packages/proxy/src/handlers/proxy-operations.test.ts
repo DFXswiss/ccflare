@@ -123,10 +123,13 @@ function createRequestMeta(): RequestMeta {
 	};
 }
 
-function retryableResponse(status = 529): Response {
+function retryableResponse(
+	status = 529,
+	extraHeaders?: Record<string, string>,
+): Response {
 	return new Response("overloaded", {
 		status,
-		headers: { "x-should-retry": "true" },
+		headers: { "x-should-retry": "true", ...extraHeaders },
 	});
 }
 
@@ -231,16 +234,25 @@ describe("proxyWithAccount retry loop", () => {
 		);
 		globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-		const start = Date.now();
-		const response = await invokeProxy(
-			createContext({ attempts: 3, delayMs: 25, backoff: 2 }),
-		);
-		const elapsed = Date.now() - start;
+		// Pin Math.random to its upper bound so jitter degenerates to the
+		// base delay and we can assert on a deterministic floor.
+		const originalRandom = Math.random;
+		Math.random = () => 1;
+		try {
+			const start = Date.now();
+			const response = await invokeProxy(
+				createContext({ attempts: 3, delayMs: 25, backoff: 2 }),
+			);
+			const elapsed = Date.now() - start;
 
-		// Expected waits: attempt 0 -> 25ms, attempt 1 -> 50ms => >= 75ms total
-		expect(fetchMock).toHaveBeenCalledTimes(3);
-		expect(response?.status).toBe(200);
-		expect(elapsed).toBeGreaterThanOrEqual(70);
+			// Expected waits with Math.random()=1: attempt 0 -> 25ms,
+			// attempt 1 -> 50ms => >= 75ms total.
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+			expect(response?.status).toBe(200);
+			expect(elapsed).toBeGreaterThanOrEqual(70);
+		} finally {
+			Math.random = originalRandom;
+		}
 	});
 
 	it("tracks retry count when retries occur and propagates it to the worker", async () => {
@@ -282,4 +294,103 @@ describe("proxyWithAccount retry loop", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(startMessageFrom(testCtx.workerMessages).retryAttempt).toBe(0);
 	});
+
+	it("applies full jitter to the configured backoff", async () => {
+		// Pin Math.random=0.5 -> jitter halves the base delay. Without the
+		// jitter change this test would observe ~75ms (25 + 50); with jitter
+		// it should be ~half of that.
+		const responses = [
+			retryableResponse(529),
+			retryableResponse(529),
+			new Response("ok", { status: 200 }),
+		];
+		const fetchMock = mock(() =>
+			Promise.resolve(responses.shift() as Response),
+		);
+		globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+		const originalRandom = Math.random;
+		Math.random = () => 0.5;
+		try {
+			const start = Date.now();
+			const response = await invokeProxy(
+				createContext({ attempts: 3, delayMs: 100, backoff: 2 }),
+			);
+			const elapsed = Date.now() - start;
+
+			// Base delays: 100ms, 200ms. With Math.random=0.5 jittered values
+			// are 50ms + 100ms = 150ms total. Allow generous upper slack for
+			// fetch + worker scheduling but require we sat well below the
+			// un-jittered floor (300ms).
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+			expect(response?.status).toBe(200);
+			expect(elapsed).toBeGreaterThanOrEqual(140);
+			expect(elapsed).toBeLessThan(260);
+		} finally {
+			Math.random = originalRandom;
+		}
+	});
+
+	it("honors retry-after as a floor when it exceeds the jittered backoff", async () => {
+		// Upstream asks for a 1s retry-after but our configured delay is
+		// only 10ms. The retry-after must override.
+		const responses = [
+			retryableResponse(529, { "retry-after": "1" }),
+			new Response("ok", { status: 200 }),
+		];
+		const fetchMock = mock(() =>
+			Promise.resolve(responses.shift() as Response),
+		);
+		globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+		const start = Date.now();
+		const response = await invokeProxy(
+			createContext({ attempts: 3, delayMs: 10, backoff: 1 }),
+		);
+		const elapsed = Date.now() - start;
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(response?.status).toBe(200);
+		// retry-after: 1 second. Allow a tiny scheduling slack below the
+		// nominal value but require the wait to be far above the 10ms
+		// configured delay.
+		expect(elapsed).toBeGreaterThanOrEqual(950);
+	});
+
+	it("caps the base delay at MAX_BACKOFF_MS (30s) even with an aggressive config", async () => {
+		// With delayMs=1000, backoff=2, attempt=10 the un-capped base would
+		// be 1_024_000ms. We force Math.random=1 so the jitter degenerates
+		// to the base, then assert the observed wait fits inside the cap.
+		const responses = [
+			retryableResponse(529),
+			new Response("ok", { status: 200 }),
+		];
+		const fetchMock = mock(() =>
+			Promise.resolve(responses.shift() as Response),
+		);
+		globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+		const originalRandom = Math.random;
+		Math.random = () => 1;
+		try {
+			const start = Date.now();
+			// Use a fairly conservative attempt-count so the test completes
+			// in ~30s rather than minutes. attempt=0 with delayMs=1000 and
+			// backoff=2 hits the cap if we crank delayMs high enough; pick
+			// delayMs=60_000 so the un-capped delay (60s) exceeds the cap.
+			const response = await invokeProxy(
+				createContext({ attempts: 1, delayMs: 60_000, backoff: 2 }),
+			);
+			const elapsed = Date.now() - start;
+
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(response?.status).toBe(200);
+			// Should wait around 30s (the cap), not 60s (the un-capped base).
+			// Allow generous upper slack for scheduling and fetch overhead.
+			expect(elapsed).toBeGreaterThanOrEqual(29_500);
+			expect(elapsed).toBeLessThan(35_000);
+		} finally {
+			Math.random = originalRandom;
+		}
+	}, 40_000);
 });
