@@ -1,7 +1,18 @@
 import { describe, expect, it } from "bun:test";
 import type { Account } from "@ccflare/types";
 import type { ResolvedProxyContext } from "./proxy-types";
-import { processProxyResponse } from "./response-processor";
+import {
+	isRetryableUpstreamError,
+	processProxyResponse,
+} from "./response-processor";
+
+function makeResponse(status: number, shouldRetry?: string): Response {
+	const headers = new Headers();
+	if (shouldRetry !== undefined) {
+		headers.set("x-should-retry", shouldRetry);
+	}
+	return new Response(null, { status, headers });
+}
 
 function createAccount(): Account {
 	return {
@@ -82,6 +93,36 @@ function createContext(rateLimitInfo: {
 		},
 	};
 }
+
+describe("isRetryableUpstreamError", () => {
+	it("treats 529 with x-should-retry=true as retryable", () => {
+		expect(isRetryableUpstreamError(makeResponse(529, "true"))).toBe(true);
+	});
+
+	it("treats 503 with x-should-retry=true as retryable", () => {
+		expect(isRetryableUpstreamError(makeResponse(503, "true"))).toBe(true);
+	});
+
+	it("treats 502 with x-should-retry=true as retryable", () => {
+		expect(isRetryableUpstreamError(makeResponse(502, "true"))).toBe(true);
+	});
+
+	it("does not retry 529 without the header", () => {
+		expect(isRetryableUpstreamError(makeResponse(529))).toBe(false);
+	});
+
+	it("does not retry 500 with x-should-retry=false", () => {
+		expect(isRetryableUpstreamError(makeResponse(500, "false"))).toBe(false);
+	});
+
+	it("does not retry 200 even with x-should-retry=true (status < 500)", () => {
+		expect(isRetryableUpstreamError(makeResponse(200, "true"))).toBe(false);
+	});
+
+	it("does not retry 429 with x-should-retry=true (rate-limit owns this path)", () => {
+		expect(isRetryableUpstreamError(makeResponse(429, "true"))).toBe(false);
+	});
+});
 
 describe("processProxyResponse", () => {
 	it("keeps successful response processing limited to rate-limit metadata updates", () => {
