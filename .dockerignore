@@ -1,0 +1,55 @@
+# VCS / editor
+.git
+.gitignore
+.gitattributes
+.github
+.vscode
+.idea
+.DS_Store
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# Build outputs – the build stage regenerates everything it needs.
+# Keeping these out keeps the build deterministic and the context small.
+**/node_modules
+**/dist
+**/build
+**/artifacts
+**/.bun-build
+**/*.bun-build
+apps/desktop/.desktop-runtime
+tsconfig.tsbuildinfo
+
+# Runtime state that should never be baked into an image
+ccflare.db
+ccflare.db-wal
+ccflare.db-shm
+logs
+*.log
+tmp
+
+# Tests / coverage / fixtures – not needed at runtime
+**/*.test.ts
+**/*.integration.test.ts
+**/test-helpers
+coverage
+
+# Docs / meta
+docs
+README.md
+AGENTS.md
+CLAUDE.md
+LICENSE
+.jscpd.json
+.biomeignore
+biome.json
+
+# Agent scratch dirs
+.factory
+.agents
+.claude
+skills-lock.json
+git-crypt-key
