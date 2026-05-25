@@ -51,16 +51,16 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
 
-      - name: Notify DFXServer/server to redeploy
+      - name: Notify downstream repo
         env:
-          GH_TOKEN: ${{ secrets.SELF_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+          DISPATCH_REPO: ${{ secrets.DISPATCH_REPO }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::SELF_DISPATCH_TOKEN not configured — skipping redeploy dispatch"
+          if [ -z "$DISPATCH_REPO" ] || [ -z "$GH_TOKEN" ]; then
+            echo "::warning::DISPATCH_REPO or DISPATCH_TOKEN not configured — skipping"
             exit 0
           fi
-          gh api repos/DFXServer/server/dispatches \
+          gh api "repos/$DISPATCH_REPO/dispatches" \
             -f event_type=image-published \
             -f "client_payload[image]=dfxswiss/ccflare" \
-            -f "client_payload[sha]=${{ github.sha }}" \
-            -f "client_payload[tag]=latest"
+            -f "client_payload[sha]=${{ github.sha }}"
