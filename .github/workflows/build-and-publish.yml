@@ -1,0 +1,78 @@
+name: Build and publish container image
+
+# Builds an arm64 ccflare image on every push to `main`, publishes it to
+# Docker Hub, and signals the deploy repo (DFXServer/server) so its
+# `deploy-infrastructure.yml` workflow can reconcile the compose stack on
+# dfx01.
+#
+# Only `main` is wired up on purpose – the feature branch keeps the existing
+# manual deploy story until the patch lands and the server-repo side of the
+# migration is in place.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "bun.lock"
+      - "package.json"
+      - "apps/**"
+      - "packages/**"
+      - ".github/workflows/build-and-publish.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and push arm64 image
+    # GA on public + private repos since 2026-01 – 2 vCPU for private repos,
+    # which is plenty for this build. Fall back to a self-hosted dfx01 runner
+    # later if queue times become a problem.
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        # Action SHAs pinned to match DFXswiss/nanobot (DFX convention:
+        # consistency over latest). Bump in lockstep with nanobot.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: |
+            dfxswiss/ccflare:latest
+            dfxswiss/ccflare:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Notify downstream repo
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+          DISPATCH_REPO: ${{ secrets.DISPATCH_REPO }}
+        run: |
+          if [ -z "$DISPATCH_REPO" ] || [ -z "$GH_TOKEN" ]; then
+            echo "::warning::DISPATCH_REPO or DISPATCH_TOKEN not configured — skipping"
+            exit 0
+          fi
+          gh api "repos/$DISPATCH_REPO/dispatches" \
+            -f event_type=image-published \
+            -f "client_payload[image]=dfxswiss/ccflare" \
+            -f "client_payload[sha]=${{ github.sha }}"
